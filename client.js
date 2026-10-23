@@ -123,6 +123,12 @@ window.__ModuleLoader__.load({
 				'section.retry': '重试',
 				'section.empty': '还没有可统计的 Token 用量。',
 				'total.label': '累计',
+				'today.title': '今日用量',
+				'today.empty': '今天还没有 Token 用量。',
+				'split.total': '总量',
+				'split.cacheHit': '缓存命中',
+				'split.cacheMiss': '缓存未命中',
+				'split.cacheWrite': '缓存写入',
 				'chart.daily.title': '每日用量',
 				'chart.daily.hint': '按会话日志的逐日、逐模型明细绘制；悬停查看当天各模型用量。安装本插件前已结束且未再打开的会话，其逐日明细会在打开后补全。',
 				'chart.daily.empty': '暂无按日明细。',
@@ -168,6 +174,12 @@ window.__ModuleLoader__.load({
 				'section.retry': 'Retry',
 				'section.empty': 'No token usage to report yet.',
 				'total.label': 'Total',
+				'today.title': 'Today',
+				'today.empty': 'No token usage today yet.',
+				'split.total': 'Total',
+				'split.cacheHit': 'Cache hit',
+				'split.cacheMiss': 'Cache miss',
+				'split.cacheWrite': 'Cache write',
 				'chart.daily.title': 'Daily usage',
 				'chart.daily.hint': 'Per-day, per-model usage folded from session logs; hover a day for its breakdown. Sessions that finished before this plugin was installed and were not reopened fill in once opened.',
 				'chart.daily.empty': 'No daily detail yet.',
@@ -234,6 +246,12 @@ window.__ModuleLoader__.load({
 		function shortDay(day) {
 			const parts = day.split('-');
 			return String(Number(parts[1])) + '/' + String(Number(parts[2]));
+		}
+
+		/** The browser's local calendar day, matching the Host fold's day keys. */
+		function todayKey() {
+			const now = new Date();
+			return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
 		}
 
 		/** Round a maximum up to a friendly axis bound (1/2/2.5/5×10^k). */
@@ -418,7 +436,7 @@ window.__ModuleLoader__.load({
 					modelTotals.set(key, [current[0] + buckets[0], current[1] + buckets[1], current[2] + buckets[2], current[3] + buckets[3]]);
 				}
 			}
-			if (perDate.size === 0) return { dates: [], models: [], dayTotals: [] };
+			if (perDate.size === 0) return { dates: [], models: [], dayTotals: [], days: {} };
 			const allDates = [...perDate.keys()].sort();
 			let dates = allDates;
 			if (allDates.length > DAILY_DAY_CAP) {
@@ -451,7 +469,15 @@ window.__ModuleLoader__.load({
 				for (const buckets of perDate.get(date)?.values() ?? []) sum += buckets[0] + buckets[1] + buckets[2] + buckets[3];
 				return sum;
 			});
-			return { dates: axis, models: seriesModels, dayTotals };
+			const days = {};
+			for (const date of axis) {
+				const dayMap = perDate.get(date);
+				if (dayMap === void 0) continue;
+				const record = {};
+				for (const [key, buckets] of dayMap) record[key] = buckets;
+				days[date] = record;
+			}
+			return { dates: axis, models: seriesModels, dayTotals, days };
 		}
 
 		/** Original artwork: three rising bars, currentColor for theming. */
@@ -516,7 +542,7 @@ window.__ModuleLoader__.load({
 					rows: [],
 					byModel: [],
 					totals: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, sessions: 0 },
-					daily: { dates: [], models: [], dayTotals: [] },
+					daily: { dates: [], models: [], dayTotals: [], days: {} },
 					colorByKey: {},
 					fill: null,
 					error: void 0,
@@ -562,7 +588,7 @@ window.__ModuleLoader__.load({
 					rows: [],
 					byModel: [],
 					totals: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, sessions: 0 },
-					daily: { dates: [], models: [], dayTotals: [] },
+					daily: { dates: [], models: [], dayTotals: [], days: {} },
 					colorByKey: {},
 					fill: null,
 					error: void 0,
@@ -797,33 +823,148 @@ window.__ModuleLoader__.load({
 		const BAR_VB = { w: 520, h: 170 };
 		const BAR_PAD = { left: 46, right: 12, top: 10, bottom: 8 };
 
-		/** Per-model total bar chart: one colored bar per used model. */
-		const ModelBarChart = React.memo(function ModelBarChart({ models, colorByKey }) {
+		/** Generic label/value hover tooltip (bar charts). */
+		function ValueTooltip({ left, top, transform, title, rows }) {
+			return h('div', { className: 'tsp-tooltip', style: {
+				left: left + '%',
+				top: (top ?? 0) + '%',
+				transform: transform ?? 'translateX(-50%)',
+			} },
+				h('div', { className: 'tsp-tooltip-title' }, title),
+				rows.map((row) => h('div', {
+					className: 'tsp-tooltip-row',
+					key: row.label,
+					style: row.strong ? { color: 'var(--dsw-alias-label-primary)', fontWeight: 600 } : void 0,
+				},
+					h('span', { className: 'tsp-tooltip-name' }, row.label),
+					h('span', { className: 'tsp-tooltip-value' }, row.value))));
+		}
+
+		/**
+		 * Per-model bar chart with a hover tooltip splitting each bar into
+		 * total / cache hit / cache miss / cache write / output. Bars need
+		 * `{ key, total, input, cacheRead, cacheWrite, output }` plus an
+		 * optional `label`; `fallbackLabel` covers unknown routes.
+		 */
+		const ModelBarChart = React.memo(function ModelBarChart({ models, colorByKey, height, fallbackLabel, t }) {
+			const [hover, setHover] = React.useState(void 0);
 			const count_ = models.length;
-			const innerWidth = BAR_VB.w - BAR_PAD.left - BAR_PAD.right;
-			const innerHeight = BAR_VB.h - BAR_PAD.top - BAR_PAD.bottom;
+			const vbH = height ?? BAR_VB.h;
+			const pad = { left: BAR_PAD.left, right: BAR_PAD.right, top: BAR_PAD.top, bottom: BAR_PAD.bottom };
+			const innerWidth = BAR_VB.w - pad.left - pad.right;
+			const innerHeight = vbH - pad.top - pad.bottom;
 			const maxY = niceMax(Math.max(1, ...models.map((model) => model.total)));
-			const yAt = (value) => BAR_PAD.top + innerHeight * (1 - value / maxY);
+			const yAt = (value) => pad.top + innerHeight * (1 - value / maxY);
 			const slot = innerWidth / Math.max(1, count_);
 			const barWidth = Math.min(40, slot * 0.6);
 			const yTicks = [0, maxY / 2, maxY];
-			return h('svg', { viewBox: '0 0 ' + BAR_VB.w + ' ' + BAR_VB.h, role: 'img' },
-				yTicks.map((tick) => h('g', { key: 'y' + tick },
-					h('line', { className: 'tsp-grid', x1: BAR_PAD.left, x2: BAR_VB.w - BAR_PAD.right, y1: yAt(tick), y2: yAt(tick) }),
-					h('text', { className: 'tsp-axis', x: BAR_PAD.left - 6, y: yAt(tick) + 3, textAnchor: 'end' }, formatCompact(Math.round(tick))))),
-				models.map((model, index) => {
-					const barHeight = Math.max(2, innerHeight * (model.total / maxY));
-					return h('g', { key: model.key },
-						h('title', null, (model.label ?? '?') + ' — ' + formatExact(model.total)),
-						h('rect', {
-							x: BAR_PAD.left + slot * index + (slot - barWidth) / 2,
+			const onMove = (event) => {
+				const rect = event.currentTarget.getBoundingClientRect();
+				const dataX = ((event.clientX - rect.left) * BAR_VB.w) / rect.width;
+				if (dataX < pad.left) {
+					setHover(void 0);
+					return;
+				}
+				// Nearest bar center, not a slot split: bars are narrow, so the
+				// pointer should follow the bar it is actually closest to.
+				const index = Math.round((dataX - pad.left - slot / 2) / slot);
+				setHover(index >= 0 && index < count_ ? index : void 0);
+			};
+			const hovered = hover === void 0 ? void 0 : models[hover];
+			const tooltipRows = hovered === void 0 ? [] : [
+				{ label: t('split.total'), value: formatExact(hovered.total), strong: true },
+				{ label: t('split.cacheHit'), value: formatExact(hovered.cacheRead ?? 0) },
+				{ label: t('split.cacheMiss'), value: formatExact(hovered.input ?? 0) },
+				(hovered.cacheWrite ?? 0) > 0 ? { label: t('split.cacheWrite'), value: formatExact(hovered.cacheWrite) } : null,
+				{ label: t('col.output'), value: formatExact(hovered.output ?? 0) },
+			].filter(Boolean);
+			// Anchor the tooltip to the hovered bar's top center: above the
+			// bar when there is headroom, beside its top when the bar nearly
+			// fills the plot; flipped horizontally near the chart edges.
+			const barCenterX = pad.left + slot * (hover ?? 0) + slot / 2;
+			const barTopY = hovered === void 0 ? 0 : yAt(hovered.total);
+			const anchorX = (barCenterX / BAR_VB.w) * 100;
+			const anchorY = (barTopY / vbH) * 100;
+			let tooltipTransform;
+			if (anchorY > 30) {
+				tooltipTransform = anchorX > 82
+					? 'translateX(calc(-100% + 10px)) translateY(calc(-100% - 8px))'
+					: anchorX < 18
+						? 'translateX(10px) translateY(calc(-100% - 8px))'
+						: 'translateX(-50%) translateY(calc(-100% - 8px))';
+			} else {
+				tooltipTransform = anchorX > 60
+					? 'translateX(calc(-100% - 14px)) translateY(-30%)'
+					: 'translateX(14px) translateY(-30%)';
+			}
+			return h('div', { style: { position: 'relative' } },
+				h('svg', {
+					viewBox: '0 0 ' + BAR_VB.w + ' ' + vbH,
+					role: 'img',
+					onMouseMove: count_ > 0 ? onMove : void 0,
+					onMouseLeave: count_ > 0 ? () => setHover(void 0) : void 0,
+				},
+					yTicks.map((tick) => h('g', { key: 'y' + tick },
+						h('line', { className: 'tsp-grid', x1: pad.left, x2: BAR_VB.w - pad.right, y1: yAt(tick), y2: yAt(tick) }),
+						h('text', { className: 'tsp-axis', x: pad.left - 6, y: yAt(tick) + 3, textAnchor: 'end' }, formatCompact(Math.round(tick))))),
+					models.map((model, index) => {
+						const barHeight = Math.max(2, innerHeight * (model.total / maxY));
+						return h('rect', {
+							key: model.key,
+							x: pad.left + slot * index + (slot - barWidth) / 2,
 							y: yAt(model.total),
 							width: barWidth,
 							height: barHeight,
 							rx: 3,
 							fill: colorOf(colorByKey, model.key),
-						}));
-				}));
+							opacity: hover === void 0 || hover === index ? 1 : 0.45,
+						});
+					})),
+				hovered !== void 0 ? h(ValueTooltip, {
+					left: anchorX,
+					top: anchorY,
+					transform: tooltipTransform,
+					title: hovered.label ?? fallbackLabel,
+					rows: tooltipRows,
+				}) : null);
+		});
+
+		/**
+		 * Today card: the local day's total and a per-model bar chart, sourced
+		 * from the daily projection's entry for the browser's calendar day.
+		 */
+		const TodayCard = React.memo(function TodayCard({ daily, colorByKey, t }) {
+			const key = todayKey();
+			const routes = daily.days ? daily.days[key] : void 0;
+			const items = [];
+			let total = 0;
+			if (isDayMap(routes)) {
+				for (const modelKey of Object.keys(routes)) {
+					const buckets = routes[modelKey];
+					if (!Array.isArray(buckets) || buckets.length !== 4) continue;
+					const sum = buckets[0] + buckets[1] + buckets[2] + buckets[3];
+					if (sum <= 0) continue;
+					total += sum;
+					items.push({ key: modelKey, total: sum, input: buckets[0], output: buckets[1], cacheRead: buckets[2], cacheWrite: buckets[3] });
+				}
+			}
+			items.sort((a, b) => b.total - a.total);
+			const labels = new Map(daily.models.map((series) => [series.key, series.label]));
+			for (const item of items) item.label = labels.get(item.key) ?? null;
+			return h('div', { className: 'tsp-chart' },
+				h('div', { className: 'tsp-head' },
+					h('h3', { className: 'tsp-block-title' }, t('today.title')),
+					h('span', { className: 'tsp-state' }, shortDay(key))),
+				total === 0 ? h('p', { className: 'tsp-empty' }, t('today.empty')) : [
+					h('div', { className: 'tsp-total-row' },
+						h('span', { className: 'tsp-total-value' }, formatExact(total)),
+						h('span', { className: 'tsp-total-label' }, t('tooltip.total'))),
+					h(ModelBarChart, { models: items, colorByKey, height: 130, fallbackLabel: t('label.unknownModel'), t }),
+					h('div', { className: 'tsp-legend' }, items.map((item) => h('span', { className: 'tsp-chip', key: item.key },
+						h('span', { className: 'tsp-dot', style: { background: colorOf(colorByKey, item.key) } }),
+						h('span', { className: 'tsp-clip' }, labels.get(item.key) ?? t('label.unknownModel')),
+						h('span', { style: { fontVariantNumeric: 'tabular-nums' } }, formatCompact(item.total))))),
+				]);
 		});
 
 		/** Numeric table cell. */
@@ -882,6 +1023,7 @@ window.__ModuleLoader__.load({
 					h('button', { type: 'button', className: 'tsp-refresh', onClick: () => controller.load() }, t('section.retry'))) : null,
 				snapshot.status === 'idle' || snapshot.status === 'loading' ? h('p', { className: 'tsp-empty', role: 'status' }, t('section.loading')) :
 					snapshot.rows.length === 0 ? h('p', { className: 'tsp-empty' }, t('section.empty')) : [
+						h(TodayCard, { daily: snapshot.daily, colorByKey: snapshot.colorByKey, t, key: 'today' }),
 						h('div', { className: 'tsp-card', key: 'total' },
 							h('div', { className: 'tsp-total-row' },
 								h('span', { className: 'tsp-total-label' }, t('total.label')),
@@ -905,7 +1047,7 @@ window.__ModuleLoader__.load({
 							h('p', { className: 'tsp-hint' }, t('chart.daily.hint'))),
 						h('div', { className: 'tsp-chart', key: 'bar' },
 							h('h3', { className: 'tsp-block-title' }, t('chart.bar.title')),
-							h(ModelBarChart, { models: snapshot.byModel, colorByKey: snapshot.colorByKey }),
+							h(ModelBarChart, { models: snapshot.byModel, colorByKey: snapshot.colorByKey, fallbackLabel: t('label.unknownModel'), t }),
 							h('div', { className: 'tsp-legend' }, snapshot.byModel.map((group) => h('span', { className: 'tsp-chip', key: group.key },
 								h('span', { className: 'tsp-dot', style: { background: colorOf(snapshot.colorByKey, group.key) } }),
 								group.label ?? t('label.unknownModel'),
