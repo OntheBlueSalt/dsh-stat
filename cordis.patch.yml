@@ -1,0 +1,10 @@
+# token-stat — bundle activation layer (dsh.bundle.patch).
+#
+# The loader inserts the row below when the profile composes this bundle;
+# the Node module resolver locates the installed package by name. Override
+# this row's config in the profile's own cordis.patch.yml by id 'token-stat'
+# without touching this file.
+- insert:
+    - id: token-stat
+      name: '@local/token-stat'
+      config: {}

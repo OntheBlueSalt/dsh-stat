@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Token Stats",
+    "description": "A pill below the composer plus a 'Token usage' settings page: daily line chart, per-model bar chart, and compact tables in one screen."
+  }
+}
