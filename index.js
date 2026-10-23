@@ -195,6 +195,9 @@ const definition = {
 
 export const inject = [];
 
+/** The projection unit itself, exposed for unit tests; the runtime path is apply() above. */
+export { definition };
+
 export function apply(ctx) {
 	ctx.inject(['sessionProjections'], (projectionCtx) => {
 		projectionCtx.effect(() => projectionCtx.sessionProjections.register(definition), 'token-stat: tokenUsageDaily projection');

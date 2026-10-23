@@ -1,5 +1,7 @@
 # token-stat
 
+官方的 UsagePill 只统计当前会话，token-stat 把**全部会话的 Token 用量跨会话累计**成一个数字——输入框旁的药丸看总量，设置页按天、按模型看明细。计数口径与官方 token-meter 的折叠规则对齐：同一 `(turn, step)` 的用量样本**后到替换先到**、重试尝试照常累加，会话重放与重新结算都**不会重复计数**。
+
 DeepSeek Harness（DSH）插件，两个界面共享一份数据故事：
 
 1. **输入框下方药丸**：显示全部会话的**累计 Token 用量**。官方自带的 UsagePill 只统计当前会话，本插件补充跨会话累计口径。
@@ -48,7 +50,8 @@ token-stat/
 ├── package.json       # bundle 清单：dsh.bundle.patch + dsh.client(web)
 ├── cordis.patch.yml   # 激活层：向 loader 插入 id=token-stat 的插件行
 ├── index.js           # Host 半身：tokenUsageDaily 会话投影（日期 × 模型 × 四桶）
-├── client.js          # Client 半身：dock 药丸 + 设置页（卡片/曲线图/柱状图/表格）
+├── client.js           # Client 半身：dock 药丸 + 设置页（卡片/曲线图/柱状图/表格）
+├── test/               # 投影折叠逻辑单元测试（node:test，零依赖）
 ├── locale/en.json     # Plugin Manager 展示元数据（英文）
 ├── locale/zh.json     # Plugin Manager 展示元数据（中文）
 ├── icon.svg           # 插件图标（原创三柱图形）
@@ -57,11 +60,24 @@ token-stat/
 
 ## 安装
 
-在 DSH 会话中让 agent 调用 `plugin_manager` 的 `install_bundle` 动作，`target`
-传本目录的绝对路径（Electron 托管的 profile——如 desktop——不接受
-`dsh plugin` 命令行，这是唯一途径；自建 profile 也可用
-`dsh plugin --profile <profile> add <本目录>`）。安装以本地链接方式指向本目录，
-改代码后刷新 Web 页面即生效；调整 `exports`/`files` 等清单字段后需重新安装。
+把本目录推到 GitHub 仓库（根目录即插件），之后任意 profile 一条命令直接安装：
+
+```
+dsh plugin add https://github.com/<user>/token-stat
+```
+
+也接受 `github:<user>/token-stat`、`git+https://…`、带 `#tag` 的任意 pnpm git 形式。
+清单无构建脚本、无运行时依赖，pnpm 不会触发构建审批（`allowBuilds`），克隆打包即用；
+测试目录不进安装产物（`files` 白名单）。Electron 托管的 profile（如 desktop）改用
+`dsh plugin --profile desktop add …`；或在 DSH 会话里让 agent 调用 `plugin_manager` 的
+`install_bundle` 动作，`target` 传本目录的绝对路径。本地开发仍推荐目录链接：
+
+```
+dsh plugin --profile <profile> add <本目录绝对路径>
+```
+
+安装以本地链接方式指向本目录时，改代码后刷新 Web 页面即生效；调整
+`exports`/`files` 等清单字段后需重新安装。
 
 安装后刷新 Web 页面：输入框下方可见药丸（尚未产生任何对话用量时药丸不显示）；设置里
 出现「Token 用量」项，点击即见统计。首次打开时页面会在后台补算历史会话的逐日明细。
